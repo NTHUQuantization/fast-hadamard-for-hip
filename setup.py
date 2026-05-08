@@ -23,6 +23,8 @@ from torch.utils.cpp_extension import (
     CUDA_HOME,
 )
 
+from torch.utils.cpp_extension import CppExtension
+from torch.utils.cpp_extension import ROCM_HOME
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -38,7 +40,9 @@ BASE_WHEEL_URL = "https://github.com/Dao-AILab/fast-hadamard-transform/releases/
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
 FORCE_BUILD = os.getenv("FAST_HADAMARD_TRANSFORM_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("FAST_HADAMARD_TRANSFORM_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
+SKIP_CUDA_BUILD = os.getenv("FAST_HADAMARD_TRANSFORM_SKIP_CUDA_BUILD", "TRUE") == "TRUE"
+SKIP_HIP_BUILD = os.getenv("FAST_HADAMARD_TRANSFORM_SKIP_HIP_BUILD", "FALSE") == "TRUE"
+
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FAST_HADAMARD_TRANSFORM_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
@@ -89,6 +93,7 @@ ext_modules = []
 
 if not SKIP_CUDA_BUILD:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
+    print("setup for CUDA")
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
@@ -162,7 +167,29 @@ if not SKIP_CUDA_BUILD:
             include_dirs=[this_dir],
         )
     )
+elif not SKIP_HIP_BUILD:
+    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
+    print("setup for HIP")
+    hip_include = "/opt/rocm-7.2.0/include"
 
+    ext_modules.append(
+        CppExtension(
+            name="fast_hadamard_transform_hip",
+            sources=[
+                "csrc/fast_hadamard_transform_to_hip.cpp",
+                "csrc/fast_hadamard_transform_cuda_to_hip.cu",
+            ],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "hip": [
+                    "-O3",
+                    "--offload-arch=gfx1201"
+                ],
+                "hipcc": ["--offload-arch=gfx1201"],
+            },
+            include_dirs=[this_dir, hip_include],
+        )
+    )
 
 def get_package_version():
     with open(Path(this_dir) / "fast_hadamard_transform" / "__init__.py", "r") as f:
@@ -179,8 +206,12 @@ def get_wheel_url():
     # Determine the version numbers that will be used to determine the correct wheel
     # We're using the CUDA version used to build torch, not the one currently installed
     # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
-    torch_cuda_version = parse(torch.version.cuda)
+    try:
+        torch_cuda_version = parse(torch.version.cuda)
+    except:
+        torch_cuda_version = parse(torch.version.hip)
     torch_version_raw = parse(torch.__version__)
+    
     # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.2
     # to save CI time. Minor versions should be compatible.
     torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
@@ -210,6 +241,9 @@ class CachedWheelsCommand(_bdist_wheel):
 
     def run(self):
         if FORCE_BUILD:
+            return super().run()
+        
+        if not SKIP_HIP_BUILD:
             return super().run()
 
         wheel_url, wheel_filename = get_wheel_url()

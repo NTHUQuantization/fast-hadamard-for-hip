@@ -1,0 +1,3 @@
+# ninja log v7
+1	21242	1777923317724551683	/user/undergraduate/tschen25/fast-hadamard-transform/build/temp.linux-x86_64-cpython-312/csrc/fast_hadamard_transform_to_hip.o	64a4e8d43180e1eb
+0	25940673	1777923317723551684	/user/undergraduate/tschen25/fast-hadamard-transform/build/temp.linux-x86_64-cpython-312/csrc/fast_hadamard_transform_cuda_to_hip.o	f77bddfd6e288549
