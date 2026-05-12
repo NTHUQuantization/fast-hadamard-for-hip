@@ -7,9 +7,9 @@ Features:
 
 ## Installation
 ```
-git clone https://github.com/Dao-AILab/fast-hadamard-transform.git fast-hadamard-transform
+git clone https://github.com/NTHUQuantization/fast-hadamard-for-hip.git
 cd fast-hadamard-transform
-pip install -v .
+pip install -v --no-build-isolation .
 ```
 
 ## How to use
