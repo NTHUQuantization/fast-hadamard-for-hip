@@ -7,6 +7,7 @@ Features:
 
 ## Installation
 ```
+export PYTORCH_ROCM_ARCH="gfx1201"
 git clone https://github.com/NTHUQuantization/fast-hadamard-for-hip.git
 cd fast-hadamard-transform
 pip install -v --no-build-isolation .
