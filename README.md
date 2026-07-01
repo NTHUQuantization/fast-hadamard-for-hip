@@ -59,4 +59,31 @@ a = torch.randn(5,32,device="cuda",dtype=torch.float16)
 scale = 1.0 / math.sqrt(a.size(-1))
 print(fast_hadamard(a,scale))
 ```
-
+# Optimized Fast Hadamard Transform for N=256 and N=4096
+```
+cd fast_hadamard_op
+python setup.py install
+```
+```
+import math
+import torch
+from fast_hadamard_transform_op import fast_hadamard
+a = torch.randn(4096,device="cuda",dtype=torch.float16)
+scale = 1.0 / math.sqrt(a.size(-1))
+print(fast_hadamard(a,scale))
+```
+# Hadacore
+```
+cd hadacore
+python setup.py install
+```
+```
+import math
+import torch
+from hadacore_for_hip import hadacore
+a = torch.randn(4096,device="cuda",dtype=torch.float16)
+scale = 1.0 / math.sqrt(a.size(-1))
+print(hadacore(a,scale))
+```
+# compare_speed.py
+Warm up both fast_hadamard and hadacore for 10,000 iterations, then benchmark their performance to verify that hadacore is faster than fast_hadamard.
