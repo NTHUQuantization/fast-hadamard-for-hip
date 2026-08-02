@@ -6,6 +6,10 @@
 #include <assert.h>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+#include <mutex>
+#include <set>
+#include <sstream>
 #include <stdint.h>
 #include <string>
 
@@ -241,6 +245,55 @@ static dim3 choose_fallback_block(int n) {
         return dim3(128);
     }
     return dim3(256);
+}
+
+static const char* dtype_name(torch::ScalarType dtype) {
+    if (dtype == torch::ScalarType::Float) {
+        return "float32";
+    }
+    if (dtype == torch::ScalarType::Half) {
+        return "float16";
+    }
+    if (dtype == torch::ScalarType::BFloat16) {
+        return "bfloat16";
+    }
+    return "unknown";
+}
+
+static std::string shape_string(c10::IntArrayRef sizes) {
+    std::ostringstream out;
+    out << "(";
+    for (size_t i = 0; i < sizes.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << sizes[i];
+    }
+    if (sizes.size() == 1) {
+        out << ",";
+    }
+    out << ")";
+    return out.str();
+}
+
+static void print_fallback_once(c10::IntArrayRef shape, torch::ScalarType dtype) {
+    static std::mutex mutex;
+    static std::set<std::string> seen;
+
+    std::string shape_text = shape_string(shape);
+    std::string dtype_text = dtype_name(dtype);
+    std::string key = shape_text + "|" + dtype_text;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    if (seen.insert(key).second) {
+        TORCH_WARN(
+            "[hadacore] 此shape是",
+            shape_text,
+            "，精度是",
+            dtype_text,
+            "，使用fallback"
+        );
+    }
 }
 
 enum class WmmaMode {
@@ -1016,6 +1069,8 @@ torch::Tensor hadamard_transform(at::Tensor& in, bool inplace, const std::string
     } else if (use_f16_wmma) {
         out = run_f16_wmma(x, had_size, inplace, stream, parsed_mode);
     } else {
+        print_fallback_once(result_shape, dtype);
+
         torch::Tensor work;
         if (dtype == torch::ScalarType::Float) {
             work = inplace ? x : x.clone();
