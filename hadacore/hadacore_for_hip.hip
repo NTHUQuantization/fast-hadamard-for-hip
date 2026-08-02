@@ -90,6 +90,100 @@ __device__ __forceinline__ uint32_t pack_f16x2(float lo, float hi) {
            (static_cast<uint32_t>(f32_to_f16_bits(hi)) << 16);
 }
 
+__device__ __forceinline__ float shfl_xor_f32(float value, int mask) {
+    return __shfl_xor_sync(0xffffffffULL, value, mask, 32);
+}
+
+__device__ __forceinline__ void warp_hadamard_regs(float vals[2], int regs, int lane) {
+    for (int mask = 1; mask < 32; mask <<= 1) {
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            if (r < regs) {
+                float a = vals[r];
+                float b = shfl_xor_f32(a, mask);
+                vals[r] = (lane & mask) == 0 ? a + b : b - a;
+            }
+        }
+    }
+
+    if (regs == 2) {
+        float a = vals[0];
+        float b = vals[1];
+        vals[0] = a + b;
+        vals[1] = a - b;
+    }
+}
+
+extern "C" __global__ void hadacore_bf16_warp_small_kernel(
+    const uint16_t* __restrict__ in,
+    uint16_t* __restrict__ out,
+    int rows,
+    int n,
+    float scale
+) {
+    int lane = threadIdx.x & 31;
+    int warp_in_block = threadIdx.x >> 5;
+    int warps_per_block = blockDim.x >> 5;
+    int row = blockIdx.x * warps_per_block + warp_in_block;
+    if (row >= rows) {
+        return;
+    }
+
+    int regs = n >> 5;
+    const uint16_t* in_row = in + row * n;
+    uint16_t* out_row = out + row * n;
+    float vals[2];
+
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        vals[r] = (r < regs) ? bf16_bits_to_f32(in_row[r * 32 + lane]) : 0.0f;
+    }
+
+    warp_hadamard_regs(vals, regs, lane);
+
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        if (r < regs) {
+            out_row[r * 32 + lane] = f32_to_bf16_bits(vals[r] * scale);
+        }
+    }
+}
+
+extern "C" __global__ void hadacore_f16_warp_small_kernel(
+    const uint16_t* __restrict__ in,
+    uint16_t* __restrict__ out,
+    int rows,
+    int n,
+    float scale
+) {
+    int lane = threadIdx.x & 31;
+    int warp_in_block = threadIdx.x >> 5;
+    int warps_per_block = blockDim.x >> 5;
+    int row = blockIdx.x * warps_per_block + warp_in_block;
+    if (row >= rows) {
+        return;
+    }
+
+    int regs = n >> 5;
+    const uint16_t* in_row = in + row * n;
+    uint16_t* out_row = out + row * n;
+    float vals[2];
+
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        vals[r] = (r < regs) ? static_cast<float>(f16_bits_to_f16(in_row[r * 32 + lane])) : 0.0f;
+    }
+
+    warp_hadamard_regs(vals, regs, lane);
+
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        if (r < regs) {
+            out_row[r * 32 + lane] = f32_to_f16_bits(vals[r] * scale);
+        }
+    }
+}
+
 __device__ __forceinline__ float shfl_f32(float value, int src_lane) {
     return __shfl(value, src_lane, 32);
 }

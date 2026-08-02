@@ -41,6 +41,18 @@ def check(rows, n, dtype):
         raise AssertionError(f"failed rows={rows} n={n} dtype={dtype} diff={diff}")
 
 
+def check_shape(shape, dtype):
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    n = shape[-1]
+    scale = 1.0 / math.sqrt(float(n))
+    got = hadacore(x, scale).float()
+    ref = ref_hadamard(x)
+    diff = (got - ref).abs().max().item()
+    print(f"shape={str(shape):18s} dtype={str(dtype):14s} max_diff={diff:.6g}")
+    if not torch.allclose(got, ref, atol=tolerance(dtype), rtol=0):
+        raise AssertionError(f"failed shape={shape} dtype={dtype} diff={diff}")
+
+
 def check_twice(n, dtype):
     x = torch.randn((n,), device="cuda", dtype=dtype)
     scale = 1.0 / math.sqrt(float(n))
@@ -56,14 +68,18 @@ def main():
         raise RuntimeError("CUDA/HIP device is required")
 
     torch.manual_seed(0)
-    for n in [64, 128, 256, 512, 1024, 2048, 4096]:
+    for n in [32, 64, 128, 256, 512, 1024, 2048, 4096]:
         check(3, n, torch.float16)
         check(7, n, torch.bfloat16)
+
+    for shape in [(2048, 128, 32), (2048, 172, 64)]:
+        check_shape(shape, torch.float16)
+        check_shape(shape, torch.bfloat16)
 
     check(3, 512, torch.float32)
     check(3, 8192, torch.float16)
 
-    for n in [64, 128, 256, 4096]:
+    for n in [32, 64, 128, 256, 4096]:
         check_twice(n, torch.float16)
 
     print("All hadacore tests passed.")

@@ -19,13 +19,15 @@ using torch::indexing::Slice;
 
 // Automatic dispatch:
 //   bf16 winners from tuning:
-//     N=64/256: transpose le256 WMMA.
+//     N=32/64: small warp-shuffle path.
+//     N=256: transpose le256 WMMA.
 //     N=128/512/1024/2048: direct WMMA + scalar outer.
 //     N=4096: row-centric CUDA-style kernel.
 //   fp16 winners from tuning:
+//     N=32/64: small warp-shuffle path.
 //     N=128/256: transpose le256 WMMA.
 //     N=4096: row-centric CUDA-style kernel.
-//     N=64/512/1024/2048: fp32 LDS fallback.
+//     N=512/1024/2048: fp32 LDS fallback.
 //   fp32, or unsupported fp16/bf16 sizes: fp32 LDS fallback.
 //   fallback requires power-of-two N <= 16384 due to LDS size.
 
@@ -155,6 +157,22 @@ extern "C" __global__ void hadacore_f16_wmma_le256_kernel(
     int rows,
     int n,
     int transpose_layout
+);
+
+extern "C" __global__ void hadacore_bf16_warp_small_kernel(
+    const uint16_t* __restrict__ in,
+    uint16_t* __restrict__ out,
+    int rows,
+    int n,
+    float scale
+);
+
+extern "C" __global__ void hadacore_f16_warp_small_kernel(
+    const uint16_t* __restrict__ in,
+    uint16_t* __restrict__ out,
+    int rows,
+    int n,
+    float scale
 );
 
 extern "C" __global__ void hadacore_f16_wmma_single_store_t_kernel(
@@ -308,6 +326,7 @@ enum class WmmaMode {
     SingleStoreTTileFlush,
     SingleStoreTUint4,
     CudaStyle4096,
+    SmallWarp,
     SingleStoreT4RowFlush,
     SingleStoreT4RowDirect,
     SingleStoreT4RowInner,
@@ -357,6 +376,9 @@ static WmmaMode parse_wmma_mode(const std::string& mode) {
         mode == "cuda_style_4096" || mode == "row_wmma_4096") {
         return WmmaMode::CudaStyle4096;
     }
+    if (mode == "small_warp") {
+        return WmmaMode::SmallWarp;
+    }
     if (mode == "single_store_t_4row_flush") {
         return WmmaMode::SingleStoreT4RowFlush;
     }
@@ -373,7 +395,7 @@ static WmmaMode parse_wmma_mode(const std::string& mode) {
         false,
         "Unsupported hadacore WMMA mode: ",
         mode,
-        ". Use auto, fallback, direct, direct_wmma, transpose, transpose_wmma, single_wmma, single_store_t, single_store_t_tile_flush, single_store_t_uint4, cuda_style, row_wmma, cuda_style_4096, row_wmma_4096, single_store_t_4row_flush, single_store_t_4row_direct, single_store_t_4row_inner, single_inner, inner or outer_scalar."
+        ". Use auto, fallback, small_warp, direct, direct_wmma, transpose, transpose_wmma, single_wmma, single_store_t, single_store_t_tile_flush, single_store_t_uint4, cuda_style, row_wmma, cuda_style_4096, row_wmma_4096, single_store_t_4row_flush, single_store_t_4row_direct, single_store_t_4row_inner, single_inner, inner or outer_scalar."
     );
     return WmmaMode::Transpose;
 }
@@ -382,7 +404,10 @@ static WmmaMode resolve_auto_wmma_mode(int had_size, WmmaMode mode) {
     if (mode != WmmaMode::Auto) {
         return mode;
     }
-    if (had_size == 64 || had_size == 256) {
+    if (had_size == 32 || had_size == 64) {
+        return WmmaMode::SmallWarp;
+    }
+    if (had_size == 256) {
         return WmmaMode::Transpose;
     }
     if (had_size == 128 || had_size == 512 || had_size == 1024 || had_size == 2048) {
@@ -398,6 +423,9 @@ static WmmaMode resolve_auto_f16_wmma_mode(int had_size, WmmaMode mode) {
     if (mode != WmmaMode::Auto) {
         return mode;
     }
+    if (had_size == 32 || had_size == 64) {
+        return WmmaMode::SmallWarp;
+    }
     if (had_size == 128 || had_size == 256) {
         return WmmaMode::Transpose;
     }
@@ -409,6 +437,10 @@ static WmmaMode resolve_auto_f16_wmma_mode(int had_size, WmmaMode mode) {
 
 static bool cuda_style_supported_size(int had_size) {
     return had_size == 4096;
+}
+
+static bool small_warp_supported_size(int had_size) {
+    return had_size == 32 || had_size == 64;
 }
 
 static bool bf16_wmma_enabled_for_size(int had_size) {
@@ -423,6 +455,9 @@ static bool bf16_wmma_enabled_for_size(int had_size) {
 static bool f16_wmma_enabled_for_mode(int had_size, WmmaMode mode) {
 #ifdef HADACORE_ENABLE_EXPERIMENTAL_WMMA
     WmmaMode resolved = resolve_auto_f16_wmma_mode(had_size, mode);
+    if (small_warp_supported_size(had_size)) {
+        return resolved == WmmaMode::SmallWarp;
+    }
     if (had_size == 128 || had_size == 256) {
         return resolved == WmmaMode::Transpose;
     }
@@ -524,7 +559,25 @@ static torch::Tensor run_bf16_wmma(
     dim3 block(32);
     size_t h256_smem = 16 * 256 * sizeof(float);
 
-    if (had_size <= 256) {
+    if (mode == WmmaMode::SmallWarp) {
+        TORCH_CHECK(small_warp_supported_size(had_size), "small_warp supports only N=32/64");
+        constexpr int warps_per_block = 8;
+        dim3 small_block(32 * warps_per_block);
+        dim3 small_grid(static_cast<unsigned int>((padded_rows + warps_per_block - 1) / warps_per_block));
+        hipLaunchKernelGGL(
+            hadacore_bf16_warp_small_kernel,
+            small_grid,
+            small_block,
+            0,
+            stream,
+            in_ptr,
+            out_ptr,
+            padded_rows,
+            had_size,
+            1.0f / std::sqrt(static_cast<float>(had_size))
+        );
+        HIP_ASSERT(hipGetLastError());
+    } else if (had_size <= 256) {
         hipLaunchKernelGGL(
             hadacore_bf16_wmma_le256_kernel,
             grid,
@@ -963,7 +1016,25 @@ static torch::Tensor run_f16_wmma(
     dim3 grid(row_groups);
     dim3 block(32);
 
-    if (had_size <= 256) {
+    if (mode == WmmaMode::SmallWarp) {
+        TORCH_CHECK(small_warp_supported_size(had_size), "small_warp supports only N=32/64");
+        constexpr int warps_per_block = 8;
+        dim3 small_block(32 * warps_per_block);
+        dim3 small_grid(static_cast<unsigned int>((padded_rows + warps_per_block - 1) / warps_per_block));
+        hipLaunchKernelGGL(
+            hadacore_f16_warp_small_kernel,
+            small_grid,
+            small_block,
+            0,
+            stream,
+            in_ptr,
+            out_ptr,
+            padded_rows,
+            had_size,
+            1.0f / std::sqrt(static_cast<float>(had_size))
+        );
+        HIP_ASSERT(hipGetLastError());
+    } else if (had_size <= 256) {
         size_t smem = 16 * 256 * sizeof(float);
         hipLaunchKernelGGL(
             hadacore_f16_wmma_le256_kernel,
